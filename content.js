@@ -212,6 +212,14 @@ function buildModalHTML() {
         </div>
 
         <div class="xuf-section">
+          <h3 class="xuf-section-title">Bulk Unfollow</h3>
+          <p class="xuf-queue-info" id="xuf-bulk-status">Ready</p>
+          <button id="xuf-bulk-start" class="xuf-btn xuf-btn-danger xuf-btn-full">Start Bulk Unfollow</button>
+          <button id="xuf-bulk-stop" class="xuf-btn xuf-btn-ghost" style="display:none">Stop</button>
+          <p class="xuf-hint">3-5 sec delay between each unfollow</p>
+        </div>
+
+        <div class="xuf-section">
           <h3 class="xuf-section-title">Queue</h3>
           <p class="xuf-queue-info" id="xuf-queue-info">0 users queued</p>
           <button id="xuf-queue-all" class="xuf-btn xuf-btn-outline">+ Queue Filtered</button>
@@ -437,6 +445,10 @@ function bindModalEvents() {
     queue = []; renderModal();
   };
 
+  // Bulk Unfollow
+  el('xuf-bulk-start').onclick = startBulkUnfollow;
+  el('xuf-bulk-stop').onclick = stopBulkUnfollow;
+
   // User list actions (delegation)
   el('xuf-user-list').onclick = async (e) => {
     const btn = e.target.closest('[data-act]');
@@ -470,6 +482,92 @@ function bindModalEvents() {
 }
 
 function handleEsc(e) { if (e.key === 'Escape' && modalOpen) { closeModal(); document.removeEventListener('keydown', handleEsc); } }
+
+
+// ============================================================
+// BULK UNFOLLOW ENGINE (3-5 sec delay between each)
+// ============================================================
+let bulkRunning = false;
+
+async function startBulkUnfollow() {
+  if (bulkRunning) return;
+
+  // Get non-followers from filtered list
+  const targets = filtered.filter(u => !u.followsYou);
+  if (targets.length === 0) {
+    const status = document.getElementById('xuf-bulk-status');
+    if (status) status.textContent = 'No non-followers to unfollow!';
+    return;
+  }
+
+  bulkRunning = true;
+  const startBtn = document.getElementById('xuf-bulk-start');
+  const stopBtn = document.getElementById('xuf-bulk-stop');
+  const status = document.getElementById('xuf-bulk-status');
+
+  if (startBtn) startBtn.style.display = 'none';
+  if (stopBtn) stopBtn.style.display = 'block';
+
+  let count = 0;
+  let failed = 0;
+
+  for (let i = 0; i < targets.length; i++) {
+    if (!bulkRunning) break; // Stopped by user
+
+    const user = targets[i];
+    if (status) status.textContent = `Unfollowing ${i + 1}/${targets.length}: @${user.username}...`;
+
+    // Execute unfollow
+    const result = await executeUnfollow(user);
+
+    if (result.success) {
+      count++;
+      // Remove from local users list
+      users = users.filter(u => u.username !== user.username);
+      // Update stats
+      try {
+        await send({ type: 'MANUAL_UNFOLLOW', user });
+      } catch(e) {}
+    } else {
+      failed++;
+    }
+
+    if (status) status.textContent = `Done ${count} ✓ | Failed ${failed} ✗ | Remaining ${targets.length - i - 1}`;
+
+    // Update UI every 5 unfollows
+    if (count % 5 === 0) {
+      try { stats = await send({ type: 'GET_STATS' }) || stats; } catch(e) {}
+      renderModal();
+    }
+
+    // Wait 3-5 seconds before next unfollow
+    if (i < targets.length - 1 && bulkRunning) {
+      const delay = 3000 + Math.random() * 2000; // 3-5 sec random
+      await sleep(delay);
+    }
+  }
+
+  // Done
+  bulkRunning = false;
+  if (startBtn) startBtn.style.display = 'block';
+  if (stopBtn) stopBtn.style.display = 'none';
+  if (status) status.textContent = `Complete! Unfollowed ${count}, failed ${failed}`;
+
+  // Refresh stats and render
+  try { stats = await send({ type: 'GET_STATS' }) || stats; } catch(e) {}
+  displayCount = 50;
+  renderModal();
+}
+
+function stopBulkUnfollow() {
+  bulkRunning = false;
+  const startBtn = document.getElementById('xuf-bulk-start');
+  const stopBtn = document.getElementById('xuf-bulk-stop');
+  const status = document.getElementById('xuf-bulk-status');
+  if (startBtn) startBtn.style.display = 'block';
+  if (stopBtn) stopBtn.style.display = 'none';
+  if (status) status.textContent = 'Stopped by user';
+}
 
 
 // ============================================================
