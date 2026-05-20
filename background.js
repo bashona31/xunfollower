@@ -1,11 +1,7 @@
 /**
  * X Unfollower Pro - Background Service Worker
- * Handles: Alarm scheduler, Queue management, Safety system, Chrome Storage
  */
 
-// ============================================================
-// CONSTANTS & DEFAULTS
-// ============================================================
 const DEFAULTS = {
   settings: {
     unfollowCount: 15,
@@ -21,18 +17,12 @@ const DEFAULTS = {
     todayUnfollowed: 0,
     lastResetDate: new Date().toDateString(),
     sessionStarted: null
-  },
-  queue: [],
-  whitelist: [],
-  history: []
+  }
 };
 
 const ALARM_NAME = 'xunfollower-scheduler';
-const DAILY_RESET_ALARM = 'xunfollower-daily-reset';
+let isProcessing = false;
 
-// ============================================================
-// STORAGE HELPERS
-// ============================================================
 async function getStorage(keys) {
   return chrome.storage.local.get(keys);
 }
@@ -48,14 +38,14 @@ async function getSettings() {
 
 async function getStats() {
   const { stats } = await getStorage('stats');
-  const currentStats = stats || DEFAULTS.stats;
+  const s = stats || DEFAULTS.stats;
   const today = new Date().toDateString();
-  if (currentStats.lastResetDate !== today) {
-    currentStats.todayUnfollowed = 0;
-    currentStats.lastResetDate = today;
-    await setStorage({ stats: currentStats });
+  if (s.lastResetDate !== today) {
+    s.todayUnfollowed = 0;
+    s.lastResetDate = today;
+    await setStorage({ stats: s });
   }
-  return currentStats;
+  return s;
 }
 
 async function getQueue() {
@@ -68,9 +58,6 @@ async function getWhitelist() {
   return whitelist || [];
 }
 
-// ============================================================
-// RANDOM DELAY SYSTEM
-// ============================================================
 function getRandomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -79,24 +66,16 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ============================================================
-// QUEUE MANAGER
-// ============================================================
-let isProcessing = false;
-let currentBatch = [];
-
 async function addToQueue(users) {
   const queue = await getQueue();
   const whitelist = await getWhitelist();
   const settings = await getSettings();
-
   const filtered = users.filter(user => {
     if (whitelist.includes(user.username)) return false;
     if (settings.skipVerified && user.isVerified) return false;
     if (queue.some(q => q.username === user.username)) return false;
     return true;
   });
-
   const newQueue = [...queue, ...filtered];
   await setStorage({ queue: newQueue });
   return newQueue.length;
@@ -104,18 +83,22 @@ async function addToQueue(users) {
 
 async function removeFromQueue(username) {
   const queue = await getQueue();
-  const newQueue = queue.filter(u => u.username !== username);
-  await setStorage({ queue: newQueue });
-  return newQueue;
+  await setStorage({ queue: queue.filter(u => u.username !== username) });
 }
 
-async function clearQueue() {
-  await setStorage({ queue: [] });
+async function executeUnfollow(user) {
+  try {
+    const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
+    if (tabs.length === 0) return { success: false, reason: 'No X tab found' };
+    const response = await chrome.tabs.sendMessage(tabs[0].id, { type: 'EXECUTE_UNFOLLOW', user });
+    return response || { success: false, reason: 'No response' };
+  } catch (error) {
+    return { success: false, reason: error.message };
+  }
 }
 
 async function processBatch() {
   if (isProcessing) return { success: false, reason: 'Already processing' };
-
   const settings = await getSettings();
   const stats = await getStats();
   const queue = await getQueue();
@@ -127,225 +110,85 @@ async function processBatch() {
 
   const remaining = settings.maxDailyUnfollows - stats.todayUnfollowed;
   const batchSize = Math.min(settings.unfollowCount, remaining, queue.length);
-
-  if (batchSize === 0) {
-    return { success: false, reason: 'No users in queue' };
-  }
+  if (batchSize === 0) return { success: false, reason: 'No users in queue' };
 
   isProcessing = true;
-  currentBatch = queue.slice(0, batchSize);
+  const batch = queue.slice(0, batchSize);
   const results = [];
 
-  for (let i = 0; i < currentBatch.length; i++) {
-    const user = currentBatch[i];
+  for (let i = 0; i < batch.length; i++) {
+    const user = batch[i];
     const delay = getRandomDelay(settings.minDelay, settings.maxDelay);
     await sleep(delay);
-
     const result = await executeUnfollow(user);
     results.push({ user: user.username, success: result.success });
 
     if (result.success) {
       stats.todayUnfollowed++;
       stats.totalUnfollowed++;
-
       const currentQueue = await getQueue();
-      const updatedQueue = currentQueue.filter(u => u.username !== user.username);
-      await setStorage({ queue: updatedQueue });
-
+      await setStorage({ queue: currentQueue.filter(u => u.username !== user.username) });
       const { history } = await getStorage('history');
-      const updatedHistory = [...(history || []), {
-        username: user.username,
-        displayName: user.displayName,
-        unfollowedAt: Date.now(),
-        wallchainScore: user.wallchainScore
-      }];
-      await setStorage({ history: updatedHistory.slice(-500) });
+      const h = [...(history || []), { username: user.username, displayName: user.displayName, unfollowedAt: Date.now(), wallchainScore: user.wallchainScore }];
+      await setStorage({ history: h.slice(-500) });
     }
 
-    broadcastMessage({
-      type: 'UNFOLLOW_PROGRESS',
-      current: i + 1,
-      total: currentBatch.length,
-      user: user.username,
-      success: result.success
-    });
+    chrome.runtime.sendMessage({ type: 'UNFOLLOW_PROGRESS', current: i + 1, total: batch.length, user: user.username, success: result.success }).catch(() => {});
   }
 
   await setStorage({ stats });
   isProcessing = false;
-  currentBatch = [];
-
-  broadcastMessage({ type: 'BATCH_COMPLETE', results });
+  chrome.runtime.sendMessage({ type: 'BATCH_COMPLETE', results }).catch(() => {});
   return { success: true, results };
 }
 
-// ============================================================
-// UNFOLLOW EXECUTION
-// ============================================================
-async function executeUnfollow(user) {
-  try {
-    const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
-    if (tabs.length === 0) {
-      return { success: false, reason: 'No X tab found' };
-    }
-    const tab = tabs[0];
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      type: 'EXECUTE_UNFOLLOW',
-      user: user
-    });
-    return response || { success: false, reason: 'No response from content script' };
-  } catch (error) {
-    console.error('Unfollow error:', error);
-    return { success: false, reason: error.message };
-  }
-}
-
-// ============================================================
-// SCHEDULER
-// ============================================================
 async function startScheduler() {
   const settings = await getSettings();
-  chrome.alarms.create(ALARM_NAME, {
-    delayInMinutes: 0.1,
-    periodInMinutes: settings.intervalMinutes
-  });
-  await setStorage({
-    settings: { ...settings, autoMode: true },
-    stats: { ...(await getStats()), sessionStarted: Date.now() }
-  });
-  broadcastMessage({ type: 'SCHEDULER_STARTED' });
+  chrome.alarms.create(ALARM_NAME, { delayInMinutes: 0.1, periodInMinutes: settings.intervalMinutes });
+  await setStorage({ settings: { ...settings, autoMode: true } });
 }
 
 async function stopScheduler() {
   chrome.alarms.clear(ALARM_NAME);
   const settings = await getSettings();
   await setStorage({ settings: { ...settings, autoMode: false } });
-  broadcastMessage({ type: 'SCHEDULER_STOPPED' });
 }
 
-// ============================================================
-// ALARM HANDLER
-// ============================================================
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === ALARM_NAME) {
-    await processBatch();
-  }
-  if (alarm.name === DAILY_RESET_ALARM) {
-    const stats = await getStats();
-    stats.todayUnfollowed = 0;
-    stats.lastResetDate = new Date().toDateString();
-    await setStorage({ stats });
-  }
+  if (alarm.name === ALARM_NAME) await processBatch();
 });
 
-chrome.alarms.create(DAILY_RESET_ALARM, { periodInMinutes: 1440 });
-
-// ============================================================
-// MESSAGE HANDLER
-// ============================================================
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  handleMessage(message, sender).then(sendResponse).catch(err => {
-    sendResponse({ success: false, error: err.message });
-  });
+  (async () => {
+    switch (message.type) {
+      case 'GET_SETTINGS': return await getSettings();
+      case 'SAVE_SETTINGS': await setStorage({ settings: { ...(await getSettings()), ...message.settings } }); return { success: true };
+      case 'GET_STATS': return await getStats();
+      case 'GET_QUEUE': return await getQueue();
+      case 'ADD_TO_QUEUE': const qs = await addToQueue(message.users); return { success: true, queueSize: qs };
+      case 'REMOVE_FROM_QUEUE': await removeFromQueue(message.username); return { success: true };
+      case 'CLEAR_QUEUE': await setStorage({ queue: [] }); return { success: true };
+      case 'START_SCHEDULER': await startScheduler(); return { success: true };
+      case 'STOP_SCHEDULER': await stopScheduler(); return { success: true };
+      case 'MANUAL_UNFOLLOW':
+        const r = await executeUnfollow(message.user);
+        if (r.success) { const s = await getStats(); s.todayUnfollowed++; s.totalUnfollowed++; await setStorage({ stats: s }); await removeFromQueue(message.user.username); }
+        return r;
+      case 'PROCESS_BATCH': return await processBatch();
+      case 'GET_PROCESSING_STATUS': return { isProcessing };
+      case 'SCAN_USERS':
+        try {
+          const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'], active: true, currentWindow: true });
+          if (tabs.length === 0) return { success: false, reason: 'No active X tab found. Please open x.com/YourUsername/following' };
+          const resp = await chrome.tabs.sendMessage(tabs[0].id, { type: 'SCAN_FOLLOWING_LIST' });
+          return resp || { success: false, reason: 'No response from content script' };
+        } catch (e) { return { success: false, reason: e.message }; }
+      default: return { success: false, reason: 'Unknown' };
+    }
+  })().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
   return true;
 });
 
-async function handleMessage(message, sender) {
-  switch (message.type) {
-    case 'GET_SETTINGS':
-      return await getSettings();
-    case 'SAVE_SETTINGS':
-      await setStorage({ settings: { ...(await getSettings()), ...message.settings } });
-      return { success: true };
-    case 'GET_STATS':
-      return await getStats();
-    case 'GET_QUEUE':
-      return await getQueue();
-    case 'ADD_TO_QUEUE':
-      const queueSize = await addToQueue(message.users);
-      return { success: true, queueSize };
-    case 'REMOVE_FROM_QUEUE':
-      await removeFromQueue(message.username);
-      return { success: true };
-    case 'CLEAR_QUEUE':
-      await clearQueue();
-      return { success: true };
-    case 'START_SCHEDULER':
-      await startScheduler();
-      return { success: true };
-    case 'STOP_SCHEDULER':
-      await stopScheduler();
-      return { success: true };
-    case 'MANUAL_UNFOLLOW':
-      const result = await executeUnfollow(message.user);
-      if (result.success) {
-        const stats = await getStats();
-        stats.todayUnfollowed++;
-        stats.totalUnfollowed++;
-        await setStorage({ stats });
-        await removeFromQueue(message.user.username);
-      }
-      return result;
-    case 'PROCESS_BATCH':
-      return await processBatch();
-    case 'GET_HISTORY':
-      const { history } = await getStorage('history');
-      return history || [];
-    case 'ADD_WHITELIST':
-      const whitelist = await getWhitelist();
-      if (!whitelist.includes(message.username)) {
-        whitelist.push(message.username);
-        await setStorage({ whitelist });
-      }
-      return { success: true };
-    case 'REMOVE_WHITELIST':
-      const wl = await getWhitelist();
-      await setStorage({ whitelist: wl.filter(u => u !== message.username) });
-      return { success: true };
-    case 'GET_WHITELIST':
-      return await getWhitelist();
-    case 'SCAN_USERS':
-      return await scanUsersFromTab();
-    case 'GET_PROCESSING_STATUS':
-      return { isProcessing, currentBatch };
-    default:
-      return { success: false, reason: 'Unknown message type' };
-  }
-}
-
-async function scanUsersFromTab() {
-  try {
-    const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'], active: true });
-    if (tabs.length === 0) {
-      return { success: false, reason: 'No active X tab found. Please open x.com' };
-    }
-    const response = await chrome.tabs.sendMessage(tabs[0].id, { type: 'SCAN_FOLLOWING_LIST' });
-    return response || { success: false, reason: 'No response from content script' };
-  } catch (error) {
-    return { success: false, reason: error.message };
-  }
-}
-
-// ============================================================
-// BROADCAST HELPER
-// ============================================================
-function broadcastMessage(message) {
-  chrome.runtime.sendMessage(message).catch(() => {});
-}
-
-// ============================================================
-// INSTALL HANDLER
-// ============================================================
-chrome.runtime.onInstalled.addListener(async (details) => {
-  if (details.reason === 'install') {
-    await setStorage({
-      settings: DEFAULTS.settings,
-      stats: DEFAULTS.stats,
-      queue: [],
-      whitelist: [],
-      history: []
-    });
-  }
+chrome.runtime.onInstalled.addListener(async () => {
+  await setStorage({ settings: DEFAULTS.settings, stats: DEFAULTS.stats, queue: [], whitelist: [], history: [] });
 });
-
-console.log('[X Unfollower Pro] Background service worker loaded');

@@ -1,497 +1,98 @@
-/**
- * X Unfollower Pro - Popup Script
- * Premium UI controller (no build step required)
- */
+(function(){
+'use strict';
+let users=[],filtered=[],settings={},stats={},queue=[];
+let filterNF=false,minScore=0,searchQ='',isSchedulerOn=false,scanning=false;
 
-(function() {
-  'use strict';
+function send(msg){return new Promise((res,rej)=>{chrome.runtime.sendMessage(msg,r=>{if(chrome.runtime.lastError)rej(new Error(chrome.runtime.lastError.message));else res(r)})});}
 
-  // ============================================================
-  // STATE
-  // ============================================================
-  let users = [];
-  let filteredUsers = [];
-  let settings = {};
-  let stats = {};
-  let queue = [];
-  let filterNonFollowers = false;
-  let minScore = 0;
-  let searchQuery = '';
-  let isSchedulerRunning = false;
-  let isScanning = false;
+async function init(){
+  try{settings=await send({type:'GET_SETTINGS'})||{unfollowCount:15,intervalMinutes:15,maxDailyUnfollows:100,minDelay:3000,maxDelay:8000,skipVerified:false,autoMode:false};}catch(e){settings={unfollowCount:15,intervalMinutes:15,maxDailyUnfollows:100,minDelay:3000,maxDelay:8000,skipVerified:false,autoMode:false};}
+  isSchedulerOn=settings.autoMode||false;
+  try{stats=await send({type:'GET_STATS'})||{totalUnfollowed:0,todayUnfollowed:0};}catch(e){stats={totalUnfollowed:0,todayUnfollowed:0};}
+  try{const r=await send({type:'GET_QUEUE'});queue=Array.isArray(r)?r:[];}catch(e){queue=[];}
+  render();bindEvents();
+}
 
-  // ============================================================
-  // CHROME MESSAGING
-  // ============================================================
-  function sendMessage(msg) {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(msg, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        } else {
-          resolve(response);
-        }
-      });
-    });
-  }
+function render(){
+  const today=stats.todayUnfollowed||0,max=settings.maxDailyUnfollows||100,pct=(today/max)*100;
+  el('progressText').textContent=today+'/'+max;
+  el('statToday').textContent=today;el('statTotal').textContent=stats.totalUnfollowed||0;el('statRemain').textContent=max-today;
+  const fill=el('progressFill');fill.style.width=Math.min(pct,100)+'%';fill.className='progress-fill'+(pct>=90?' danger':pct>=60?' warn':'');
+  el('inpBatch').value=settings.unfollowCount||15;el('inpInterval').value=settings.intervalMinutes||15;
+  el('schedSub').textContent=queue.length+' in queue';
+  const badge=el('statusBadge'),logo=el('logoIcon'),schedIcon=el('schedIcon'),schedStatus=el('schedStatus');
+  if(isSchedulerOn){badge.classList.add('active');badge.querySelector('span').textContent='Active';logo.classList.add('spin');schedIcon.classList.add('active');schedStatus.classList.remove('hidden');el('schedStatusTxt').textContent='Running: '+settings.unfollowCount+' every '+settings.intervalMinutes+' min';el('schedToggle').classList.add('active');}
+  else{badge.classList.remove('active');badge.querySelector('span').textContent='Idle';logo.classList.remove('spin');schedIcon.classList.remove('active');schedStatus.classList.add('hidden');el('schedToggle').classList.remove('active');}
+  if(queue.length>0){el('queueCard').classList.remove('hidden');el('queueText').textContent='Queue: '+queue.length;}else{el('queueCard').classList.add('hidden');}
+  if(users.length>0){el('filterCard').classList.remove('hidden');applyFilters();renderUsers();}
+}
 
-  // ============================================================
-  // INIT
-  // ============================================================
-  async function init() {
-    await loadSettings();
-    await loadStats();
-    await loadQueue();
-    setupListeners();
-    setupMessageListener();
-    updateUI();
-  }
-
-  async function loadSettings() {
-    try {
-      settings = await sendMessage({ type: 'GET_SETTINGS' }) || {
-        unfollowCount: 15,
-        intervalMinutes: 15,
-        maxDailyUnfollows: 100,
-        minDelay: 3000,
-        maxDelay: 8000,
-        skipVerified: false,
-        autoMode: false
-      };
-      isSchedulerRunning = settings.autoMode || false;
-    } catch (e) {
-      console.error('Load settings error:', e);
-    }
-  }
-
-  async function loadStats() {
-    try {
-      stats = await sendMessage({ type: 'GET_STATS' }) || {
-        totalUnfollowed: 0, todayUnfollowed: 0
-      };
-    } catch (e) {}
-  }
-
-  async function loadQueue() {
-    try {
-      const result = await sendMessage({ type: 'GET_QUEUE' });
-      queue = Array.isArray(result) ? result : [];
-    } catch (e) {
-      queue = [];
-    }
-  }
-
-  // ============================================================
-  // UI UPDATE
-  // ============================================================
-  function updateUI() {
-    updateStats();
-    updateScheduler();
-    updateQueue();
-    updateFilters();
-    updateUserList();
-  }
-
-  function updateStats() {
-    const today = stats.todayUnfollowed || 0;
-    const max = settings.maxDailyUnfollows || 100;
-    const progress = (today / max) * 100;
-
-    document.getElementById('statsProgress').textContent = `${today}/${max}`;
-    document.getElementById('statToday').textContent = today;
-    document.getElementById('statTotal').textContent = stats.totalUnfollowed || 0;
-    document.getElementById('statRemaining').textContent = max - today;
-
-    const fill = document.getElementById('progressFill');
-    fill.style.width = `${Math.min(progress, 100)}%`;
-    fill.className = 'progress-fill' +
-      (progress >= 90 ? ' danger' : progress >= 60 ? ' warning' : '');
-  }
-
-  function updateScheduler() {
-    const toggle = document.getElementById('schedulerToggle');
-    const icon = document.getElementById('schedulerIcon');
-    const status = document.getElementById('schedulerStatus');
-    const statusText = document.getElementById('schedulerStatusText');
-    const subtitle = document.getElementById('schedulerSubtitle');
-    const badge = document.getElementById('statusBadge');
-    const logoDot = document.getElementById('statusDot');
-    const logoIcon = document.getElementById('logoIcon');
-
-    document.getElementById('unfollowCount').value = settings.unfollowCount || 15;
-    document.getElementById('intervalMinutes').value = settings.intervalMinutes || 15;
-
-    subtitle.textContent = `${queue.length} users in queue`;
-
-    if (isSchedulerRunning) {
-      toggle.classList.add('active');
-      icon.classList.add('active');
-      status.classList.remove('hidden');
-      statusText.textContent = `Running: ${settings.unfollowCount} users every ${settings.intervalMinutes} min`;
-      badge.classList.add('active');
-      badge.querySelector('span').textContent = 'Active';
-      logoDot.classList.add('active');
-      logoIcon.classList.add('spinning');
-    } else {
-      toggle.classList.remove('active');
-      icon.classList.remove('active');
-      status.classList.add('hidden');
-      badge.classList.remove('active');
-      badge.querySelector('span').textContent = 'Idle';
-      logoDot.classList.remove('active');
-      logoIcon.classList.remove('spinning');
-    }
-  }
-
-  function updateQueue() {
-    const card = document.getElementById('queueCard');
-    const text = document.getElementById('queueText');
-
-    if (queue.length > 0) {
-      card.classList.remove('hidden');
-      text.textContent = `Queue: ${queue.length} users`;
-    } else {
-      card.classList.add('hidden');
-    }
-  }
-
-  function updateFilters() {
-    const card = document.getElementById('filterCard');
-    const count = document.getElementById('filterCount');
-
-    if (users.length > 0) {
-      card.classList.remove('hidden');
-      applyFilters();
-      count.textContent = `Showing ${filteredUsers.length} of ${users.length}`;
-    } else {
-      card.classList.add('hidden');
-    }
-  }
-
-  function applyFilters() {
-    filteredUsers = users.filter(user => {
-      if (filterNonFollowers && user.followsYou) return false;
-      if (minScore > 0 && (user.wallchainScore === null || user.wallchainScore < minScore)) return false;
-      if (searchQuery) {
-        const q = searchQuery.toLowerCase();
-        return user.username.toLowerCase().includes(q) ||
-               (user.displayName || '').toLowerCase().includes(q);
-      }
-      return true;
-    });
-  }
-
-  function updateUserList() {
-    const listEl = document.getElementById('userList');
-    const container = document.getElementById('userListContainer');
-    const title = document.getElementById('userListTitle');
-
-    if (filteredUsers.length === 0) {
-      listEl.classList.add('hidden');
-      return;
-    }
-
-    listEl.classList.remove('hidden');
-    title.textContent = `Users (${filteredUsers.length})`;
-
-    const queueUsernames = new Set(queue.map(u => u.username));
-
-    container.innerHTML = filteredUsers.slice(0, 100).map(user => {
-      const isInQueue = queueUsernames.has(user.username);
-      const initial = (user.displayName || user.username).charAt(0).toUpperCase();
-      const avatarContent = user.avatar
-        ? `<img src="${user.avatar}" alt="">`
-        : initial;
-
-      let scoreBadge = '';
-      if (user.wallchainScore !== null) {
-        const cls = user.wallchainScore >= 70 ? 'badge-score-high' :
-                    user.wallchainScore >= 40 ? 'badge-score-mid' : 'badge-score-low';
-        scoreBadge = `<span class="user-badge ${cls}">WC: ${user.wallchainScore}</span>`;
-      }
-
-      const followBadge = !user.followsYou
-        ? '<span class="user-badge badge-not-following">Not following</span>' : '';
-
-      const verifiedIcon = user.isVerified
-        ? '<svg class="verified-badge" fill="#1D9BF0" viewBox="0 0 24 24"><path d="M22.5 12.5c0-1.58-.875-2.95-2.148-3.6.154-.435.238-.905.238-1.4 0-2.21-1.71-3.998-3.818-3.998-.47 0-.92.084-1.336.25C14.818 2.415 13.51 1.5 12 1.5s-2.816.917-3.437 2.25c-.415-.165-.866-.25-1.336-.25-2.11 0-3.818 1.79-3.818 4 0 .494.083.964.237 1.4-1.272.65-2.147 2.018-2.147 3.6 0 1.495.782 2.798 1.942 3.486-.02.17-.032.34-.032.514 0 2.21 1.708 4 3.818 4 .47 0 .92-.086 1.335-.25.62 1.334 1.926 2.25 3.437 2.25 1.512 0 2.818-.916 3.437-2.25.415.163.865.248 1.336.248 2.11 0 3.818-1.79 3.818-4 0-.174-.012-.344-.033-.513 1.158-.687 1.943-1.99 1.943-3.484zm-6.616-3.334l-4.334 6.5c-.145.217-.382.334-.625.334-.143 0-.288-.04-.416-.126l-.115-.094-2.415-2.415c-.293-.293-.293-.768 0-1.06s.768-.294 1.06 0l1.77 1.767 3.825-5.74c.23-.345.696-.436 1.04-.207.346.23.44.696.21 1.04z"/></svg>'
-        : '';
-
-      return `
-        <div class="user-card" data-username="${user.username}">
-          <div class="user-avatar">
-            <div class="user-avatar-img">${avatarContent}</div>
-            <div class="follow-dot ${user.followsYou ? 'follows' : 'not-follows'}"></div>
-          </div>
-          <div class="user-info">
-            <div class="user-name-row">
-              <span class="user-displayname">${user.displayName || user.username}</span>
-              ${verifiedIcon}
-            </div>
-            <div class="user-meta">
-              <span class="user-handle">@${user.username}</span>
-              ${scoreBadge}
-              ${followBadge}
-            </div>
-          </div>
-          <div class="user-actions">
-            <button class="queue-btn ${isInQueue ? 'queued' : ''}" data-action="queue" data-username="${user.username}" title="${isInQueue ? 'Remove from queue' : 'Add to queue'}">
-              <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                ${isInQueue
-                  ? '<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>'
-                  : '<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>'
-                }
-              </svg>
-            </button>
-            <button class="unfollow-btn" data-action="unfollow" data-username="${user.username}">Unfollow</button>
-          </div>
-        </div>
-      `;
-    }).join('');
-
-    if (filteredUsers.length > 100) {
-      container.innerHTML += `<div style="text-align:center;padding:8px;font-size:10px;color:var(--text-muted)">Showing first 100 of ${filteredUsers.length} users</div>`;
-    }
-  }
-
-  // ============================================================
-  // EVENT LISTENERS
-  // ============================================================
-  function setupListeners() {
-    // Settings toggle
-    document.getElementById('settingsBtn').addEventListener('click', () => {
-      document.getElementById('settingsPanel').classList.remove('hidden');
-    });
-
-    document.getElementById('backBtn').addEventListener('click', () => {
-      document.getElementById('settingsPanel').classList.add('hidden');
-    });
-
-    // Save settings
-    document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
-      settings.maxDailyUnfollows = parseInt(document.getElementById('maxDaily').value) || 100;
-      settings.minDelay = parseInt(document.getElementById('minDelay').value) || 3000;
-      settings.maxDelay = parseInt(document.getElementById('maxDelay').value) || 8000;
-      await sendMessage({ type: 'SAVE_SETTINGS', settings });
-      document.getElementById('settingsPanel').classList.add('hidden');
-      updateUI();
-    });
-
-    // Skip verified toggle
-    document.getElementById('skipVerifiedToggle').addEventListener('click', function() {
-      this.classList.toggle('active');
-      settings.skipVerified = this.classList.contains('active');
-    });
-
-    // Scheduler toggle
-    document.getElementById('schedulerToggle').addEventListener('click', async () => {
-      if (isSchedulerRunning) {
-        await sendMessage({ type: 'STOP_SCHEDULER' });
-        isSchedulerRunning = false;
-      } else {
-        // Save scheduler settings first
-        settings.unfollowCount = parseInt(document.getElementById('unfollowCount').value) || 15;
-        settings.intervalMinutes = parseInt(document.getElementById('intervalMinutes').value) || 15;
-        await sendMessage({ type: 'SAVE_SETTINGS', settings });
-        await sendMessage({ type: 'START_SCHEDULER' });
-        isSchedulerRunning = true;
-      }
-      updateScheduler();
-    });
-
-    // Scheduler input changes
-    document.getElementById('unfollowCount').addEventListener('change', async (e) => {
-      settings.unfollowCount = parseInt(e.target.value) || 15;
-      await sendMessage({ type: 'SAVE_SETTINGS', settings });
-    });
-
-    document.getElementById('intervalMinutes').addEventListener('change', async (e) => {
-      settings.intervalMinutes = parseInt(e.target.value) || 15;
-      await sendMessage({ type: 'SAVE_SETTINGS', settings });
-    });
-
-    // Load button
-    document.getElementById('loadBtn').addEventListener('click', scanUsers);
-
-    // Clear queue
-    document.getElementById('clearQueueBtn').addEventListener('click', async () => {
-      await sendMessage({ type: 'CLEAR_QUEUE' });
-      queue = [];
-      updateQueue();
-      updateUserList();
-    });
-
-    // Non-followers filter
-    document.getElementById('nonFollowersBtn').addEventListener('click', function() {
-      filterNonFollowers = !filterNonFollowers;
-      this.classList.toggle('active', filterNonFollowers);
-      updateFilters();
-      updateUserList();
-    });
-
-    // Queue all
-    document.getElementById('queueAllBtn').addEventListener('click', async () => {
-      const toQueue = filteredUsers.filter(u => !u.followsYou);
-      if (toQueue.length > 0) {
-        await sendMessage({ type: 'ADD_TO_QUEUE', users: toQueue });
-        await loadQueue();
-        updateQueue();
-        updateUserList();
-        updateScheduler();
-      }
-    });
-
-    // Score slider
-    document.getElementById('scoreSlider').addEventListener('input', function() {
-      minScore = parseInt(this.value);
-      const val = document.getElementById('scoreValue');
-      val.textContent = minScore;
-      val.className = 'score-value' + (minScore > 0 ? ' active' : '');
-      updateFilters();
-      updateUserList();
-    });
-
-    // Search
-    document.getElementById('searchInput').addEventListener('input', function() {
-      searchQuery = this.value;
-      updateFilters();
-      updateUserList();
-    });
-
-    // User list clicks (delegation)
-    document.getElementById('userListContainer').addEventListener('click', async (e) => {
-      const btn = e.target.closest('[data-action]');
-      if (!btn) return;
-
-      const action = btn.dataset.action;
-      const username = btn.dataset.username;
-      const user = users.find(u => u.username === username);
-      if (!user) return;
-
-      if (action === 'unfollow') {
-        btn.disabled = true;
-        btn.textContent = '...';
-        const result = await sendMessage({ type: 'MANUAL_UNFOLLOW', user });
-        if (result && result.success) {
-          users = users.filter(u => u.username !== username);
-          await loadStats();
-          updateStats();
-          updateFilters();
-          updateUserList();
-        } else {
-          btn.disabled = false;
-          btn.textContent = 'Unfollow';
-        }
-      }
-
-      if (action === 'queue') {
-        const isInQueue = queue.some(u => u.username === username);
-        if (isInQueue) {
-          await sendMessage({ type: 'REMOVE_FROM_QUEUE', username });
-        } else {
-          await sendMessage({ type: 'ADD_TO_QUEUE', users: [user] });
-        }
-        await loadQueue();
-        updateQueue();
-        updateUserList();
-        updateScheduler();
-      }
-    });
-  }
-
-  // ============================================================
-  // SCAN USERS
-  // ============================================================
-  async function scanUsers() {
-    if (isScanning) return;
-    isScanning = true;
-
-    const btn = document.getElementById('loadBtn');
-    const hint = document.getElementById('loadHint');
-    const errorEl = document.getElementById('loadError');
-
-    btn.classList.add('scanning');
-    btn.querySelector('.load-btn-content').innerHTML = `
-      <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="animation: spin 1s linear infinite">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-      </svg>
-      Scanning following list...
-    `;
-    hint.classList.add('hidden');
-    errorEl.classList.add('hidden');
-
-    try {
-      const result = await sendMessage({ type: 'SCAN_USERS' });
-      if (result && result.success) {
-        users = result.users || [];
-        btn.querySelector('.load-btn-content').innerHTML = `
-          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-          </svg>
-          Rescan Users (${users.length} loaded)
-        `;
-        updateFilters();
-        updateUserList();
-      } else {
-        errorEl.textContent = result?.reason || 'Scan failed. Make sure you are on your X following page.';
-        errorEl.classList.remove('hidden');
-        btn.querySelector('.load-btn-content').innerHTML = `
-          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-          </svg>
-          Load Following List
-        `;
-      }
-    } catch (err) {
-      errorEl.textContent = err.message || 'Failed to scan. Ensure X tab is open.';
-      errorEl.classList.remove('hidden');
-      btn.querySelector('.load-btn-content').innerHTML = `
-        <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-        </svg>
-        Load Following List
-      `;
-    }
-
-    btn.classList.remove('scanning');
-    isScanning = false;
-  }
-
-  // ============================================================
-  // BACKGROUND MESSAGE LISTENER
-  // ============================================================
-  function setupMessageListener() {
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message.type === 'UNFOLLOW_PROGRESS' || message.type === 'BATCH_COMPLETE') {
-        loadStats().then(updateStats);
-        loadQueue().then(() => { updateQueue(); updateUserList(); });
-      }
-      if (message.type === 'SCAN_PROGRESS') {
-        const btn = document.getElementById('loadBtn');
-        btn.querySelector('.load-btn-content').innerHTML = `
-          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="animation: spin 1s linear infinite">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          Scanning... (${message.scanned} found)
-        `;
-      }
-    });
-  }
-
-  // ============================================================
-  // SETTINGS PANEL INIT
-  // ============================================================
-  function initSettingsPanel() {
-    document.getElementById('maxDaily').value = settings.maxDailyUnfollows || 100;
-    document.getElementById('minDelay').value = settings.minDelay || 3000;
-    document.getElementById('maxDelay').value = settings.maxDelay || 8000;
-    if (settings.skipVerified) {
-      document.getElementById('skipVerifiedToggle').classList.add('active');
-    }
-  }
-
-  // Start
-  document.addEventListener('DOMContentLoaded', () => {
-    init().then(initSettingsPanel);
+function applyFilters(){
+  filtered=users.filter(u=>{
+    if(filterNF&&u.followsYou)return false;
+    if(minScore>0&&(u.wallchainScore===null||u.wallchainScore<minScore))return false;
+    if(searchQ){const q=searchQ.toLowerCase();return u.username.toLowerCase().includes(q)||(u.displayName||'').toLowerCase().includes(q);}
+    return true;
   });
+  el('filterCount').textContent='Showing '+filtered.length+' of '+users.length;
+}
+
+function renderUsers(){
+  if(filtered.length===0){el('userSection').classList.add('hidden');return;}
+  el('userSection').classList.remove('hidden');el('userTitle').textContent='Users ('+filtered.length+')';
+  const qSet=new Set(queue.map(u=>u.username));
+  el('userList').innerHTML=filtered.slice(0,100).map(u=>{
+    const inQ=qSet.has(u.username);
+    const init=(u.displayName||u.username).charAt(0).toUpperCase();
+    const av=u.avatar?'<img src="'+u.avatar+'" alt="">':init;
+    let scoreBadge='';
+    if(u.wallchainScore!==null){const cls=u.wallchainScore>=70?'badge-green':u.wallchainScore>=40?'badge-yellow':'badge-red';scoreBadge='<span class="badge '+cls+'">WC:'+u.wallchainScore+'</span>';}
+    const nfBadge=!u.followsYou?'<span class="badge badge-red">Not following</span>':'';
+    return '<div class="user-card" data-u="'+u.username+'"><div class="user-avatar">'+av+'<div class="follow-dot '+(u.followsYou?'yes':'no')+'"></div></div><div class="user-info"><div class="user-name">'+
+    (u.displayName||u.username)+(u.isVerified?' ✓':'')+'</div><div class="user-meta"><span class="user-handle">@'+u.username+'</span>'+scoreBadge+nfBadge+'</div></div><div class="user-actions"><button class="q-btn'+(inQ?' on':'')+'" data-act="queue" data-u="'+u.username+'">'+(inQ?'✓':'+')+'</button><button class="uf-btn" data-act="uf" data-u="'+u.username+'">Unfollow</button></div></div>';
+  }).join('');
+}
+
+function bindEvents(){
+  el('settingsBtn').onclick=()=>{el('settingsView').classList.remove('hidden');el('sMaxDaily').value=settings.maxDailyUnfollows;el('sMinDelay').value=settings.minDelay;el('sMaxDelay').value=settings.maxDelay;if(settings.skipVerified)el('sSkipVerified').classList.add('active');};
+  el('backBtn').onclick=()=>el('settingsView').classList.add('hidden');
+  el('saveBtn').onclick=async()=>{settings.maxDailyUnfollows=+el('sMaxDaily').value||100;settings.minDelay=+el('sMinDelay').value||3000;settings.maxDelay=+el('sMaxDelay').value||8000;settings.skipVerified=el('sSkipVerified').classList.contains('active');await send({type:'SAVE_SETTINGS',settings});el('settingsView').classList.add('hidden');render();};
+  el('sSkipVerified').onclick=function(){this.classList.toggle('active');};
+  el('schedToggle').onclick=async()=>{
+    if(isSchedulerOn){await send({type:'STOP_SCHEDULER'});isSchedulerOn=false;}
+    else{settings.unfollowCount=+el('inpBatch').value||15;settings.intervalMinutes=+el('inpInterval').value||15;await send({type:'SAVE_SETTINGS',settings});await send({type:'START_SCHEDULER'});isSchedulerOn=true;}
+    render();
+  };
+  el('loadBtn').onclick=scanUsers;
+  el('clearQueueBtn').onclick=async()=>{await send({type:'CLEAR_QUEUE'});queue=[];render();};
+  el('btnNonFollowers').onclick=function(){filterNF=!filterNF;this.classList.toggle('active',filterNF);applyFilters();renderUsers();};
+  el('btnQueueAll').onclick=async()=>{const toQ=filtered.filter(u=>!u.followsYou);if(toQ.length){await send({type:'ADD_TO_QUEUE',users:toQ});const r=await send({type:'GET_QUEUE'});queue=Array.isArray(r)?r:[];render();}};
+  el('scoreSlider').oninput=function(){minScore=+this.value;const v=el('scoreVal');v.textContent=minScore;v.className='score-val'+(minScore>0?' on':'');applyFilters();renderUsers();};
+  el('searchInput').oninput=function(){searchQ=this.value;applyFilters();renderUsers();};
+  el('userList').onclick=async(e)=>{
+    const btn=e.target.closest('[data-act]');if(!btn)return;
+    const act=btn.dataset.act,uname=btn.dataset.u,user=users.find(u=>u.username===uname);if(!user)return;
+    if(act==='uf'){btn.disabled=true;btn.textContent='...';const r=await send({type:'MANUAL_UNFOLLOW',user});if(r&&r.success){users=users.filter(u=>u.username!==uname);stats=await send({type:'GET_STATS'})||stats;render();}else{btn.disabled=false;btn.textContent='Unfollow';}}
+    if(act==='queue'){const inQ=queue.some(u=>u.username===uname);if(inQ)await send({type:'REMOVE_FROM_QUEUE',username:uname});else await send({type:'ADD_TO_QUEUE',users:[user]});const r=await send({type:'GET_QUEUE'});queue=Array.isArray(r)?r:[];render();}
+  };
+  chrome.runtime.onMessage.addListener(msg=>{
+    if(msg.type==='UNFOLLOW_PROGRESS'||msg.type==='BATCH_COMPLETE'){send({type:'GET_STATS'}).then(r=>{stats=r||stats;render();});send({type:'GET_QUEUE'}).then(r=>{queue=Array.isArray(r)?r:[];render();});}
+    if(msg.type==='SCAN_PROGRESS')el('loadBtnText').textContent='Scanning... ('+msg.scanned+' found)';
+  });
+}
+
+async function scanUsers(){
+  if(scanning)return;scanning=true;
+  const btn=el('loadBtn'),hint=el('loadHint'),err=el('loadError');
+  btn.classList.add('scanning');el('loadBtnText').textContent='⏳ Scanning...';hint.classList.add('hidden');err.classList.add('hidden');
+  try{
+    const r=await send({type:'SCAN_USERS'});
+    if(r&&r.success){users=r.users||[];el('loadBtnText').textContent='⬇ Rescan ('+users.length+' loaded)';render();}
+    else{err.textContent=r?.reason||'Scan failed. Open x.com/YourUsername/following first.';err.classList.remove('hidden');el('loadBtnText').textContent='⬇ Load Following List';}
+  }catch(e){err.textContent=e.message;err.classList.remove('hidden');el('loadBtnText').textContent='⬇ Load Following List';}
+  btn.classList.remove('scanning');scanning=false;
+}
+
+function el(id){return document.getElementById(id);}
+document.addEventListener('DOMContentLoaded',init);
 })();
