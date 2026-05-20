@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0B1120;
+    color: #F3F4F6;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0B1120;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #374151;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #8B5CF6;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-primary-card/80 backdrop-blur-md border border-white/5 rounded-xl;
+  }
+
+  .glass-button {
+    @apply bg-primary-accent/20 backdrop-blur-sm border border-primary-accent/30 rounded-lg
+           hover:bg-primary-accent/40 hover:border-primary-accent/60
+           transition-all duration-300 ease-out;
+  }
+
+  .neon-glow {
+    box-shadow: 0 0 15px rgba(139, 92, 246, 0.3),
+                0 0 30px rgba(139, 92, 246, 0.1);
+  }
+
+  .neon-border {
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    box-shadow: inset 0 0 15px rgba(139, 92, 246, 0.05);
+  }
+
+  .gradient-text {
+    @apply bg-gradient-to-r from-primary-accent to-primary-hover bg-clip-text text-transparent;
+  }
+
+  .premium-input {
+    @apply bg-primary-bg/60 border border-white/10 rounded-lg px-3 py-2
+           text-primary-text text-sm
+           focus:outline-none focus:border-primary-accent/50 focus:ring-1 focus:ring-primary-accent/30
+           transition-all duration-200;
+  }
+
+  .status-dot {
+    @apply w-2 h-2 rounded-full;
+  }
+
+  .status-active {
+    @apply bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)];
+  }
+
+  .status-inactive {
+    @apply bg-gray-500;
+  }
+
+  .status-warning {
+    @apply bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.6)];
+  }
+}
