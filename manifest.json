@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "X Unfollower Pro",
-  "version": "1.0.0",
-  "description": "Premium tool to detect non-followers, filter by Wallchain score, and automate safe unfollowing on X (Twitter)",
+  "version": "2.0.0",
+  "description": "Premium floating dashboard for X - detect non-followers, filter by Wallchain score, automate safe unfollowing",
   "permissions": [
     "storage",
     "alarms",
@@ -20,17 +20,10 @@
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
       "js": ["content.js"],
+      "css": ["modal.css"],
       "run_at": "document_idle"
     }
   ],
-  "action": {
-    "default_popup": "popup.html",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
-  },
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
