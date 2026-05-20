@@ -95,19 +95,38 @@ async function fullScan(progressCb) {
   isScanning = true;
   scannedUsers.clear();
   let noNew = 0;
-  for (let i = 0; i < 50 && noNew < 5; i++) {
+  let lastHeight = document.documentElement.scrollHeight;
+
+  // Scroll up to 150 times or until no new users found 8 times in a row
+  for (let i = 0; i < 150 && noNew < 8; i++) {
     const prev = scannedUsers.size;
+
+    // Scan all visible user cells
     document.querySelectorAll('[data-testid="UserCell"]').forEach(cell => {
       const u = extractUserFromCell(cell);
       if (u && !scannedUsers.has(u.username)) scannedUsers.set(u.username, u);
     });
+
     if (progressCb) progressCb(scannedUsers.size);
-    if (scannedUsers.size === prev) noNew++; else noNew = 0;
-    window.scrollBy(0, window.innerHeight * 0.8);
-    await sleep(800 + Math.random() * 700);
-    const newH = document.documentElement.scrollHeight;
-    if (noNew >= 3) break;
+
+    if (scannedUsers.size === prev) {
+      noNew++;
+    } else {
+      noNew = 0;
+    }
+
+    // Scroll down
+    window.scrollBy(0, window.innerHeight * 0.9);
+
+    // Wait for X.com to load more content (longer wait = more reliable)
+    await sleep(1200 + Math.random() * 800);
+
+    // Check if page actually scrolled (reached end)
+    const newHeight = document.documentElement.scrollHeight;
+    if (newHeight === lastHeight && noNew >= 4) break;
+    lastHeight = newHeight;
   }
+
   isScanning = false;
   const arr = Array.from(scannedUsers.values());
   return { success: true, users: arr, total: arr.length, nonFollowers: arr.filter(u => !u.followsYou).length };
