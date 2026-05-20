@@ -1,5 +1,6 @@
 /**
- * X Unfollower Pro - Background Service Worker
+ * X Unfollower Pro v2 - Background Service Worker
+ * Handles: Icon click → toggle modal, scheduler, queue, storage
  */
 
 const DEFAULTS = {
@@ -23,13 +24,44 @@ const DEFAULTS = {
 const ALARM_NAME = 'xunfollower-scheduler';
 let isProcessing = false;
 
-async function getStorage(keys) {
-  return chrome.storage.local.get(keys);
-}
+// ============================================================
+// ICON CLICK → TOGGLE MODAL
+// ============================================================
+chrome.action.onClicked.addListener(async (tab) => {
+  if (!tab.url || (!tab.url.includes('x.com') && !tab.url.includes('twitter.com'))) {
+    // Not on X - open X in new tab
+    chrome.tabs.create({ url: 'https://x.com' });
+    return;
+  }
+  try {
+    await chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_MODAL' });
+  } catch(e) {
+    // Content script might not be injected yet, inject it
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['content.js']
+      });
+      await chrome.scripting.insertCSS({
+        target: { tabId: tab.id },
+        files: ['modal.css']
+      });
+      // Retry toggle
+      setTimeout(async () => {
+        try { await chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_MODAL' }); } catch(e2) {}
+      }, 500);
+    } catch(e2) {
+      console.error('[X Unfollower Pro] Cannot inject:', e2);
+    }
+  }
+});
 
-async function setStorage(data) {
-  return chrome.storage.local.set(data);
-}
+
+// ============================================================
+// STORAGE HELPERS
+// ============================================================
+async function getStorage(keys) { return chrome.storage.local.get(keys); }
+async function setStorage(data) { return chrome.storage.local.set(data); }
 
 async function getSettings() {
   const { settings } = await getStorage('settings');
@@ -62,10 +94,11 @@ function getRandomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ============================================================
+// QUEUE MANAGEMENT
+// ============================================================
 async function addToQueue(users) {
   const queue = await getQueue();
   const whitelist = await getWhitelist();
@@ -86,17 +119,24 @@ async function removeFromQueue(username) {
   await setStorage({ queue: queue.filter(u => u.username !== username) });
 }
 
+// ============================================================
+// UNFOLLOW EXECUTION (via content script)
+// ============================================================
 async function executeUnfollow(user) {
   try {
     const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
     if (tabs.length === 0) return { success: false, reason: 'No X tab found' };
     const response = await chrome.tabs.sendMessage(tabs[0].id, { type: 'EXECUTE_UNFOLLOW', user });
     return response || { success: false, reason: 'No response' };
-  } catch (error) {
-    return { success: false, reason: error.message };
+  } catch(e) {
+    return { success: false, reason: e.message };
   }
 }
 
+
+// ============================================================
+// BATCH PROCESSOR
+// ============================================================
 async function processBatch() {
   if (isProcessing) return { success: false, reason: 'Already processing' };
   const settings = await getSettings();
@@ -118,30 +158,32 @@ async function processBatch() {
 
   for (let i = 0; i < batch.length; i++) {
     const user = batch[i];
-    const delay = getRandomDelay(settings.minDelay, settings.maxDelay);
-    await sleep(delay);
+    await sleep(getRandomDelay(settings.minDelay, settings.maxDelay));
     const result = await executeUnfollow(user);
     results.push({ user: user.username, success: result.success });
 
     if (result.success) {
       stats.todayUnfollowed++;
       stats.totalUnfollowed++;
-      const currentQueue = await getQueue();
-      await setStorage({ queue: currentQueue.filter(u => u.username !== user.username) });
+      const cur = await getQueue();
+      await setStorage({ queue: cur.filter(u => u.username !== user.username) });
       const { history } = await getStorage('history');
-      const h = [...(history || []), { username: user.username, displayName: user.displayName, unfollowedAt: Date.now(), wallchainScore: user.wallchainScore }];
+      const h = [...(history || []), { username: user.username, displayName: user.displayName, unfollowedAt: Date.now() }];
       await setStorage({ history: h.slice(-500) });
     }
 
-    chrome.runtime.sendMessage({ type: 'UNFOLLOW_PROGRESS', current: i + 1, total: batch.length, user: user.username, success: result.success }).catch(() => {});
+    broadcast({ type: 'UNFOLLOW_PROGRESS', current: i + 1, total: batch.length, user: user.username, success: result.success });
   }
 
   await setStorage({ stats });
   isProcessing = false;
-  chrome.runtime.sendMessage({ type: 'BATCH_COMPLETE', results }).catch(() => {});
+  broadcast({ type: 'BATCH_COMPLETE', results });
   return { success: true, results };
 }
 
+// ============================================================
+// SCHEDULER
+// ============================================================
 async function startScheduler() {
   const settings = await getSettings();
   chrome.alarms.create(ALARM_NAME, { delayInMinutes: 0.1, periodInMinutes: settings.intervalMinutes });
@@ -158,6 +200,20 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_NAME) await processBatch();
 });
 
+// ============================================================
+// BROADCAST TO CONTENT SCRIPTS
+// ============================================================
+function broadcast(msg) {
+  chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] }, tabs => {
+    tabs.forEach(tab => {
+      chrome.tabs.sendMessage(tab.id, msg).catch(() => {});
+    });
+  });
+}
+
+// ============================================================
+// MESSAGE HANDLER
+// ============================================================
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message.type) {
@@ -176,19 +232,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return r;
       case 'PROCESS_BATCH': return await processBatch();
       case 'GET_PROCESSING_STATUS': return { isProcessing };
-      case 'SCAN_USERS':
-        try {
-          const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'], active: true, currentWindow: true });
-          if (tabs.length === 0) return { success: false, reason: 'No active X tab found. Please open x.com/YourUsername/following' };
-          const resp = await chrome.tabs.sendMessage(tabs[0].id, { type: 'SCAN_FOLLOWING_LIST' });
-          return resp || { success: false, reason: 'No response from content script' };
-        } catch (e) { return { success: false, reason: e.message }; }
       default: return { success: false, reason: 'Unknown' };
     }
   })().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
   return true;
 });
 
+// ============================================================
+// INSTALL HANDLER
+// ============================================================
 chrome.runtime.onInstalled.addListener(async () => {
   await setStorage({ settings: DEFAULTS.settings, stats: DEFAULTS.stats, queue: [], whitelist: [], history: [] });
 });
